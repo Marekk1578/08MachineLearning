@@ -1,0 +1,258 @@
+---
+title: "Classifying How Well Subjects Use A Dumbbell"
+author: "Marek Kluczynski"
+date: "31 January 2016"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+##Introduction
+
+This paper is part of a course project for the Machine Learning module of the Data Science Specialisation delivered by the Johns Hopkins university on Coursera.
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. Devices such as Jawbone Up, Nike Fuel Band, and Fitbit can collect data about personal activity. A group of enthusiasts collected data using accelerometers on the belt, forearm, arm, and dumbbell from 6 participants. 
+
+The data collected can be viewed at http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+This paper uses machine learning methods to predict the manner in which participants did the exercise; it describes how hte model was built, how cross vaildiation was used, what the expected out of sample error is and why design decisions were made. In addition predictions are made on 20 test cases.
+
+##Packages
+
+The following R packages available on CRAN are used in this paper
+
+```{r message=FALSE}
+require(caret);
+require(ggplot2);
+require(plyr);
+require(dplyr);
+require(lubridate);
+require(doParallel);
+require(AppliedPredictiveModeling);
+```
+
+##Data Preparation
+
+The following code downloads the test and training datasets from the URLs provided by Coursera:
+
+```{r}
+#Set File Variables
+URL.Training <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+URL.Test <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+File.Training <- './data/pml-training.csv'
+File.Test <- './data/pml-testing.csv'
+
+#Check if data directory exists
+if(!dir.exists("./data")) 
+{
+        dir.create("data", showWarnings = TRUE, recursive = FALSE, mode = "0777")
+}
+
+# Download Test and Training Datasets
+download.file(URL.Training, File.Training)
+download.file(URL.Test, File.Test)
+
+#Read files into data frames
+TrainingData <- read.csv(file=File.Training, header=TRUE, sep=",",na.strings = "NA"  )
+TestData <- read.csv(file=File.Test, header=TRUE, sep=",",na.strings = "NA"  )
+```
+
+The original datasets that the assignment dataset was derived from can be found at http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+The assignment brief provided was to use data from accelerometers on the belt, forearm, arm, and dumbbell. As such the following code selects only data which is from accelerometers as opposed to any other sensor.
+
+```{r}
+#Subset data frames for accelerometers plus classe
+names <- c(grep("accel", colnames(TrainingData), value = TRUE), "classe")
+names.testdata <- c(grep("accel", colnames(TrainingData), value = TRUE))
+
+#Create subset with only requried columns
+TrainingData.filtered <- TrainingData[,names]
+TestData.filtered <- TestData[,names.testdata]
+```
+
+Next a check for columns which a large number of NAs was completed as invalid values may affect the output of the machine learning algorithm. The following code checks for NA's and outputs a summary table:
+
+```{r}
+#Check for NA's
+TrainingData.NA <- sapply(TrainingData.filtered, function(y) sum(length(which(is.na(y)))))
+TrainingData.NA
+
+#show number of rows
+nrow(TrainingData.filtered)
+```
+
+The output shows the columns with the string "var" in them can be discounted as they mostly unpopulated, the following code creates a new data frame removing the columns in question
+
+```{r}
+#Remove vars
+TrainingData.filtered <- select(TrainingData.filtered, -contains("var"))
+TestData.filtered <- select(TestData.filtered, -contains("var"))
+```
+
+Next within the data preparation stage the training dataset must be paritioned into two datasets used for training and vailidation.
+
+
+Lastly for data preparation the training data must be split into a training dataset and a test dataset, the training partition will include 70% of the training dataset and the model validation partition will include 30%. The following code completes the partitioning class.
+
+```{r}
+#Spilt the training data into a training set and a model test set
+inTrain <- createDataPartition(y=TrainingData.filtered$classe, p=0.7, list=FALSE )
+TrainingData.filtered.training <- TrainingData.filtered[inTrain, ]
+TrainingData.filtered.testing <- TrainingData.filtered[-inTrain, ]
+```
+
+##Data Exploration
+
+In order to better understand the features of the filtered dataset prior to commencing any modelling some initial data exploration consisting some data visualisation will be completed. The data visualisations which will be employed are an overlaid Density Plot and a set of box plots with the intention of highlighting the features of the data.
+
+The following code generates a set of box plots for all of the various accelerometers and plots the distributions of the data for each exercise classification
+
+```{r}
+featurePlot(x = TrainingData.filtered.training[, 1:16],
+            y = TrainingData.filtered.training$classe,
+            plot = "box",
+            ## Pass in options to bwplot() 
+            scales = list(y = list(relation="free"),
+                          x = list(rot = 90)),
+            layout = c(4,4 ),
+            auto.key = list(columns = 5))
+```
+
+The plot shows that total_accel_arm, total_accel_forearm, accel_dumbell_x, accel_arm_z and accel_belt_x has quite a number of outliers within the range of data available, this could mean that these varibales are of least interest to hte model. The remainder of the accelerometer data does show differences between the at least one and the rest of the classifications.
+
+The following code generates a set of box plots for all of the various accelerometers and plots the distributions of the data for each exercise classification
+
+```{r}
+transparentTheme(trans = .9)
+featurePlot(x = TrainingData.filtered.training[, 1:16],
+            y = TrainingData.filtered.training$classe,
+            plot = "density",
+            scales = list(x = list(relation="free"),
+                          y = list(relation="free")),
+            adjust = 1.5,
+            pch = "|",
+            layout = c(4,4),
+            auto.key = list(columns = 5))
+```
+
+A cursory inspection of the  overlayed density plots show a few interesting that may be useful for classfiction with there peaks for all the various classifications. Annoyingly the denisty plot has shown both A and E as the same colour.
+
+##Model Training
+
+The R package "caret" has many machine learning algorithms available for prediction, a full list can be found at http://topepo.github.io/caret/modelList.html. In this particular scenario the selected model must be a model which predicts a discrete value that can then be used to classify a subjects behaviour.
+
+The Generalized Linear Model, Recursive Partitioning and Regression Trees and and Random Forest all can be used for prediction of discrete values, as such they will be used in this paper to classify the subjects behaviour based on accelerometer measurements.
+
+One of the problems with training machine learning algorithms on a Windows platform in R is that they can take a long time to run. The for each package allows R to execute processes sequentially or in parallel using various packages depending on the operating system the host environment is running. On a windows platform natively  R does not make full use of modern multi core architecture and runs models on a single core of a processor and since the host environment this paper was executed on is a windows machine the author has chosen to address this problem. Revolution Analytics's (recently acquired by Microsoft) have addressed the problem discussed in the paragraph above with the doParallel package, details of the package can be found at https://cran.r-project.org/web/packages/doParallel/index.html. Please note that additional binaries were downloaded from https://mran.revolutionanalytics.com/download/ in order to make this package functional. The approach for a mac or Unix machine would be different, however in all situations the caret package can make use of the parallelism to speed up model training.
+
+The following code enables parallel processing on within R on a Windows environment and then trains three prediction models using the Generalized Linear Model algorithm, Rotation Forest algorithm and and Random Forest and algorithm. In addition it uses a  cross vaildiation a 10 (the default value).
+
+
+```{r}
+#Cross vailidation
+fitControl <- trainControl(## 10-fold CV
+        method = "repeatedcv",
+        number = 10,
+        ## repeated ten times
+        repeats = 10)
+
+
+require(doParallel);
+#Detect number of cores on host enviroment less one so it remains responsive
+cores <- detectCores() - 1
+#Go and setup the Parrell Processing
+cl <- makeCluster(cores)
+registerDoParallel(cl)
+#Train the models
+set.seed(825)
+#General Linear Model
+model.regression <- train(classe ~ ., data=TrainingData.filtered.training, 
+                          model="glm", 
+
+                          trControl = fitControl)
+set.seed(47)
+#Random Forrest
+model.forest <- train(classe ~ . , 
+                        data=TrainingData.filtered.training, 
+                        model="rf",
+                        trControl = fitControl)
+set.seed(962)
+#Recursive Partitioning and Regression Trees
+model.rotate <- train(classe ~ ., 
+                        data=TrainingData.filtered.training, 
+                        model="rpart",
+                        trControl = fitControl)
+#Stop the cluster
+stopCluster(cl)
+
+```
+
+To evaluate the performance of the model we must test it with the test data partition created earlier in the paper, this will use the trained models to predict a classification and we can then check this prediction against a known classification to see if the prediction was correct. The following code predicts classifications using the models trained above:
+
+```{r}
+#Now we have a model predict some values
+predict.regression <- predict(model.regression, TrainingData.filtered.testing)
+predict.forest <- predict(model.forest, TrainingData.filtered.testing)
+predict.rotate <- predict(model.rotate, TrainingData.filtered.testing)
+```
+
+##Model Evaluation
+
+In this section we will look at the performance of each of the models in turn and decide which model performs best. The models will be evaluated with a confusion matrix.
+
+###General Linear Model
+
+The confusion matrix for the general linear model is as follows
+
+```{r}
+#Produce confusion matrix for GLM
+confusionMatrix(predict.regression, TrainingData.filtered.testing$classe)
+```
+
+The model accuracy is reported as 94.46% with a 95% confidence interval of  (0.9385, 0.9503) and a p value <2.2e-16.
+
+###Random Forrest
+
+The confusion Matrix for the Random Forest is as follows
+
+```{r}
+#Produce confusion matrix for GLM
+confusionMatrix(predict.forest, TrainingData.filtered.testing$classe)
+```
+The model accuracy is reported as 94.46% with a 95% confidence interval of  (0.9385, 0.9503) and a p value < 5.778e-10.
+
+###Recursive Partitioning and Regression Trees
+
+The confusion Matrix for the Recursive Partitioning and Regression Trees algorithm is as follows
+
+```{r}
+#Produce confusion matrix for rpart
+confusionMatrix(predict.rotate, TrainingData.filtered.testing$classe)
+```
+
+The model accuracy is reported as 94.51% with a 95% confidence interval of  (0.9339, 0.9508) and a p value < 2.2e-16.
+
+###Summary
+
+Overall the Recursive Partitioning and Regression Trees gave slightly better accuracy for the test data set. As a result this model was selected to use for to predict the exercise classification of the subjects in the study.
+
+For the Recursive Partitioning and Regression Trees model the important of the input variables is as follows
+
+```{r}
+treeImp <- varImp(model.rotate, scale=FALSE)
+plot(treeImp, top = 16)
+```
+
+It is interesteing to note that the variables total_accel_arm, total_accel_forearm, accel_belt_x, accel_arm_z are all fairly low down on the chart above with regards to important and all of these variables had a significant number of outliers on the boxplot chart.
+
+##Prediction
+The final part of the assignment is to predict values for the test data set provided. The following r code uses the Recursive Partitioning and Regression Trees to predict the classification of the exercise for the test data provided
+
+```{r}
+predict.tree.test <- predict(model.rotate, TestData.filtered)
+```
+
+When this was submitted to coursera for marking an score of 95% was returned which is in line with the model accuracy reporting by the confusion matrix.
+
+(1672 Words)
